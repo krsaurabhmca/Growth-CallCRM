@@ -9,16 +9,27 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSContactsUsageDescription": "This app needs access to contacts to display them in your phonebook.",
+        "NSMicrophoneUsageDescription": "This app uses the microphone for call recording features.",
+        "NSPhotoLibraryUsageDescription": "This app needs access to your photo library to save recordings."
+      },
+      "bundleIdentifier": "com.offerplant.callcrm"
     },
     "android": {
       "permissions": [
         "READ_EXTERNAL_STORAGE",
         "WRITE_EXTERNAL_STORAGE",
         "READ_MEDIA_AUDIO",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
-        "READ_MEDIA_AUDIO"
+        "READ_CONTACTS", 
+        "WRITE_CONTACTS",
+        "CALL_PHONE",
+        "READ_PHONE_STATE",
+        "READ_CALL_LOG",
+        "WRITE_CALL_LOG",
+        "RECORD_AUDIO",
+        "PROCESS_OUTGOING_CALLS"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
@@ -48,13 +59,21 @@
           }
         }
       ],
-      [      "expo-media-library",
+      [
+        "expo-media-library",
         {
           "photosPermission": "Allow $(PRODUCT_NAME) to access your photos.",
           "savePhotosPermission": "Allow $(PRODUCT_NAME) to save photos.",
           "isAccessMediaLocationEnabled": true
         }
-      ]
+      ],
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow $(PRODUCT_NAME) to access your contacts."
+        }
+      ],
+      "expo-av"
     ],
     "experiments": {
       "typedRoutes": true,
