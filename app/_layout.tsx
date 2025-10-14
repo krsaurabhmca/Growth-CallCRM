@@ -29,9 +29,9 @@ export default function RootLayout() {
         <Tabs.Screen
           name="index"
           options={{
-            title: "Calls",
+            title: "Recordings",
             tabBarIcon: ({ color, size }) => (
-              <Ionicons name="call-outline" size={size} color={color} />
+              <Ionicons name="save-outline" size={size} color={color} />
             ),
           }}
         />
@@ -54,6 +54,16 @@ export default function RootLayout() {
             title: "Contacts",
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="people-outline" size={size} color={color} />
+            ),
+          }}
+        />
+      
+      <Tabs.Screen
+          name="calllog"
+          options={{
+            title: "Call Logs",
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="call-outline" size={size} color={color} />
             ),
           }}
         />
