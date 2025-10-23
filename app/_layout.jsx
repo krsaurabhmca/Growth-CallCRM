@@ -1,11 +1,14 @@
 import { Stack } from "expo-router";
 import { StyleSheet } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { StatusBar } from "react-native-web";
 
 const _layout = () => {
   return (
     <SafeAreaProvider>
+    
     <SafeAreaView style={{ flex: 1 }} edges={['right', 'bottom', 'left'] }>
+    <StatusBar barStyle="dark-content" />
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
         <Stack.Screen name="index" options={{ headerShown: false }} />

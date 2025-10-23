@@ -1,10 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   FlatList,
   Modal,
   Platform,
@@ -15,6 +16,7 @@ import {
   TextInput,
   View
 } from 'react-native';
+//import CallDetectorManager from 'react-native-call-detection';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 // Configuration
@@ -28,6 +30,7 @@ const STORAGE_KEYS = {
   LAST_SYNC: '@last_sync_timestamp',
   API_URL: '@api_base_url',
   SYNCED_FILES: '@synced_files_list',
+  AUTO_REFRESH: '@auto_refresh_enabled',
 };
 
 // Professional Color Scheme
@@ -60,19 +63,32 @@ const COLORS = {
 };
 
 const CallRecordingApp = () => {
+  // File management state
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedPath, setSelectedPath] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCall, setSelectedCall] = useState(null);
+  
+  // Modal state
   const [modalVisible, setModalVisible] = useState(false);
   const [settingsModalVisible, setSettingsModalVisible] = useState(false);
+  
+  // Sync state
   const [syncProgress, setSyncProgress] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState(null);
-  const [apiUrl, setApiUrl] = useState(API_CONFIG.BASE_URL);
   const [syncedFilesList, setSyncedFilesList] = useState(new Set());
   const [currentSyncFile, setCurrentSyncFile] = useState('');
+  
+  // Settings state
+  const [apiUrl, setApiUrl] = useState(API_CONFIG.BASE_URL);
+  
+  // Auto-refresh state
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [lastCallTime, setLastCallTime] = useState(null);
+  const [newRecordingsCount, setNewRecordingsCount] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   
   // Audio player state
   const [sound, setSound] = useState(null);
@@ -82,19 +98,189 @@ const CallRecordingApp = () => {
   const [playbackDuration, setPlaybackDuration] = useState(0);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
 
+  // Refs
+  const appState = useRef(AppState.currentState);
+  const callDetector = useRef(null);
+  const refreshTimer = useRef(null);
+  const previousFileCount = useRef(0);
+
+  // Initialize app
   useEffect(() => {
     loadSavedSettings();
+    setupCallDetection();
+    setupAppStateListener();
     
     return () => {
+      cleanupCallDetection();
+      if (refreshTimer.current) {
+        clearTimeout(refreshTimer.current);
+      }
       if (sound) {
         sound.unloadAsync();
       }
     };
   }, []);
 
+  // Configure audio
   useEffect(() => {
     configureAudio();
   }, []);
+
+  // Track file count changes
+  useEffect(() => {
+    if (selectedPath && autoRefreshEnabled) {
+      previousFileCount.current = files.length;
+    }
+  }, [selectedPath]);
+
+  // Detect new recordings
+  useEffect(() => {
+    if (files.length > previousFileCount.current && previousFileCount.current > 0) {
+      const newCount = files.length - previousFileCount.current;
+      setNewRecordingsCount(newCount);
+      
+      // Show notification for new recordings
+      if (newCount > 0) {
+        Alert.alert(
+          '🎙️ New Recording Detected',
+          `${newCount} new recording${newCount > 1 ? 's' : ''} found!`,
+          [{ text: 'OK', onPress: () => setNewRecordingsCount(0) }]
+        );
+      }
+    }
+    previousFileCount.current = files.length;
+  }, [files.length]);
+
+  // ============================================================================
+  // CALL DETECTION & AUTO-REFRESH
+  // ============================================================================
+
+  const setupCallDetection = () => {
+    try {
+      callDetector.current = new CallDetectorManager(
+        (event, phoneNumber) => {
+          console.log('📞 Call Event:', event, phoneNumber);
+          
+          if (event === 'Disconnected') {
+            console.log('📴 Call disconnected, scheduling refresh...');
+            setLastCallTime(new Date());
+            
+            // Wait 5 seconds after call ends to ensure recording is saved
+            if (refreshTimer.current) {
+              clearTimeout(refreshTimer.current);
+            }
+            
+            refreshTimer.current = setTimeout(() => {
+              if (selectedPath && autoRefreshEnabled) {
+                console.log('🔄 Auto-refreshing after call disconnect...');
+                refreshAfterCall();
+              }
+            }, 5000); // 5 seconds delay
+          } else if (event === 'Connected') {
+            console.log('📞 Call connected');
+          } else if (event === 'Incoming') {
+            console.log('📲 Incoming call');
+          } else if (event === 'Offhook') {
+            console.log('📱 Call offhook');
+          }
+        },
+        false, // Read phone number
+        () => {
+          console.log('✅ Call detector started successfully');
+        },
+        (error) => {
+          console.error('❌ Call detector error:', error);
+        }
+      );
+    } catch (error) {
+      console.error('❌ Error setting up call detection:', error);
+    }
+  };
+
+  const cleanupCallDetection = () => {
+    if (callDetector.current) {
+      try {
+        callDetector.current.dispose();
+        console.log('🗑️ Call detector disposed');
+      } catch (error) {
+        console.error('❌ Error disposing call detector:', error);
+      }
+    }
+  };
+
+  const setupAppStateListener = () => {
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => {
+      if (subscription) {
+        subscription.remove();
+      }
+    };
+  };
+
+  const handleAppStateChange = async (nextAppState) => {
+    console.log('🔄 App state changed:', appState.current, '->', nextAppState);
+    
+    if (
+      appState.current.match(/inactive|background/) &&
+      nextAppState === 'active'
+    ) {
+      console.log('✅ App has come to foreground');
+      
+      // Check if a call was made recently (within last 60 seconds)
+      if (lastCallTime) {
+        const timeSinceCall = Date.now() - lastCallTime.getTime();
+        if (timeSinceCall < 60000) { // 60 seconds
+          console.log('📞 Recent call detected, refreshing...');
+          await refreshAfterCall();
+          return;
+        }
+      }
+      
+      // Auto-refresh if enabled and path is selected
+      if (selectedPath && autoRefreshEnabled) {
+        console.log('🔄 Auto-refreshing on app resume...');
+        await refreshAfterCall();
+      }
+    }
+    
+    appState.current = nextAppState;
+  };
+
+  const refreshAfterCall = async () => {
+    try {
+      if (isRefreshing) {
+        console.log('⏭️ Refresh already in progress, skipping...');
+        return;
+      }
+
+      setIsRefreshing(true);
+      console.log('🔄 Starting refresh...');
+      
+      const syncedSet = await loadSyncedFilesList();
+      await loadDirectory(selectedPath, syncedSet);
+      
+      console.log('✅ Refresh complete');
+    } catch (error) {
+      console.error('❌ Error refreshing after call:', error);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const toggleAutoRefresh = async () => {
+    const newValue = !autoRefreshEnabled;
+    setAutoRefreshEnabled(newValue);
+    await AsyncStorage.setItem(STORAGE_KEYS.AUTO_REFRESH, JSON.stringify(newValue));
+    Alert.alert(
+      'Auto-Refresh',
+      `Auto-refresh has been ${newValue ? 'enabled' : 'disabled'}`,
+      [{ text: 'OK' }]
+    );
+  };
+
+  // ============================================================================
+  // AUDIO CONFIGURATION
+  // ============================================================================
 
   const configureAudio = async () => {
     try {
@@ -109,7 +295,10 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Load synced files list
+  // ============================================================================
+  // STORAGE MANAGEMENT
+  // ============================================================================
+
   const loadSyncedFilesList = async () => {
     try {
       const syncedData = await AsyncStorage.getItem(STORAGE_KEYS.SYNCED_FILES);
@@ -126,7 +315,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Save synced files list
   const saveSyncedFilesList = async (syncedSet) => {
     try {
       const syncedArray = Array.from(syncedSet);
@@ -137,22 +325,20 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Generate unique file identifier
-  const getFileIdentifier = (file) => {
-    return `${file.fileName}_${file.size}_${file.timestamp}`;
-  };
-
-  // Load saved settings
   const loadSavedSettings = async () => {
     try {
-      const [savedPath, savedApiUrl, savedLastSync] = await Promise.all([
+      const [savedPath, savedApiUrl, savedLastSync, autoRefreshPref] = await Promise.all([
         AsyncStorage.getItem(STORAGE_KEYS.SAVED_PATH),
         AsyncStorage.getItem(STORAGE_KEYS.API_URL),
         AsyncStorage.getItem(STORAGE_KEYS.LAST_SYNC),
+        AsyncStorage.getItem(STORAGE_KEYS.AUTO_REFRESH),
       ]);
 
       if (savedApiUrl) setApiUrl(savedApiUrl);
       if (savedLastSync) setLastSync(new Date(parseInt(savedLastSync)));
+      if (autoRefreshPref !== null) {
+        setAutoRefreshEnabled(JSON.parse(autoRefreshPref));
+      }
 
       const syncedSet = await loadSyncedFilesList();
 
@@ -165,7 +351,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Save API URL
   const saveApiUrl = async (url) => {
     try {
       await AsyncStorage.setItem(STORAGE_KEYS.API_URL, url);
@@ -176,7 +361,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Clear synced data
   const clearSyncedData = async () => {
     Alert.alert(
       'Clear Sync History',
@@ -207,7 +391,6 @@ const CallRecordingApp = () => {
     );
   };
 
-  // Clear saved path
   const clearSavedPath = async () => {
     Alert.alert(
       'Clear Saved Path',
@@ -222,6 +405,7 @@ const CallRecordingApp = () => {
               await AsyncStorage.removeItem(STORAGE_KEYS.SAVED_PATH);
               setSelectedPath('');
               setFiles([]);
+              previousFileCount.current = 0;
               Alert.alert('✓ Success', 'Saved path cleared');
             } catch (error) {
               Alert.alert('✗ Error', 'Failed to clear path');
@@ -232,7 +416,14 @@ const CallRecordingApp = () => {
     );
   };
 
-  // Parse filename
+  // ============================================================================
+  // FILE PARSING & FORMATTING
+  // ============================================================================
+
+  const getFileIdentifier = (file) => {
+    return `${file.fileName}_${file.size}_${file.timestamp}`;
+  };
+
   const parseCallRecording = (filename) => {
     try {
       const nameWithoutExt = filename.replace(/\.(mp3|m4a|wav|amr|3gp|aac)$/i, '');
@@ -323,7 +514,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Format phone number
   const formatPhoneNumber = (number) => {
     if (!number) return 'Unknown';
     
@@ -340,7 +530,6 @@ const CallRecordingApp = () => {
     return number;
   };
 
-  // Format file size
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 B';
     const k = 1024;
@@ -349,7 +538,6 @@ const CallRecordingApp = () => {
     return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
   };
 
-  // Format duration from milliseconds
   const formatDuration = (millis) => {
     if (!millis || millis === 0) return '0:00';
     const totalSeconds = Math.floor(millis / 1000);
@@ -363,7 +551,6 @@ const CallRecordingApp = () => {
     return `${minutes}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Get actual audio duration
   const getAudioDuration = async (uri) => {
     try {
       const { sound: tempSound } = await Audio.Sound.createAsync(
@@ -384,7 +571,10 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Load directory
+  // ============================================================================
+  // DIRECTORY & FILE OPERATIONS
+  // ============================================================================
+
   const loadDirectory = async (directoryUri, syncedSet = null) => {
     try {
       setLoading(true);
@@ -401,7 +591,6 @@ const CallRecordingApp = () => {
             if (/\.(mp3|m4a|wav|amr|3gp|aac)$/i.test(fileName)) {
               const callInfo = parseCallRecording(fileName);
               
-              // Get actual duration
               const durationMillis = await getAudioDuration(fileUri);
               
               const fileData = {
@@ -437,19 +626,20 @@ const CallRecordingApp = () => {
 
       setFiles(validFiles);
       
-      if (validFiles.length === 0) {
+      if (validFiles.length === 0 && !isRefreshing) {
         Alert.alert('No Recordings', 'No audio files found in selected directory');
       }
       
     } catch (error) {
       console.error('Load error:', error);
-      Alert.alert('Error', `Failed to load directory: ${error.message}`);
+      if (!isRefreshing) {
+        Alert.alert('Error', `Failed to load directory: ${error.message}`);
+      }
     } finally {
       setLoading(false);
     }
   };
 
-  // Select directory
   const selectDirectory = async () => {
     try {
       setLoading(true);
@@ -474,7 +664,10 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Upload file
+  // ============================================================================
+  // SYNC OPERATIONS
+  // ============================================================================
+
   const uploadFileToServer = async (file) => {
     try {
       const base64Data = await FileSystem.readAsStringAsync(file.uri, {
@@ -510,7 +703,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Mark as synced
   const markFileAsSynced = async (file) => {
     const fileId = getFileIdentifier(file);
     const newSyncedSet = new Set(syncedFilesList);
@@ -519,7 +711,6 @@ const CallRecordingApp = () => {
     await saveSyncedFilesList(newSyncedSet);
   };
 
-  // Sync all files
   const syncAllFiles = async () => {
     const unsyncedFiles = files.filter(f => !f.synced);
     
@@ -592,7 +783,10 @@ const CallRecordingApp = () => {
     );
   };
 
-  // Playback status update
+  // ============================================================================
+  // AUDIO PLAYBACK
+  // ============================================================================
+
   const onPlaybackStatusUpdate = (status) => {
     if (status.isLoaded) {
       setPlaybackPosition(status.positionMillis || 0);
@@ -606,12 +800,10 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Play audio
   const playAudio = async (file) => {
     try {
       setIsLoadingAudio(true);
 
-      // Stop current playback if any
       if (sound) {
         await sound.unloadAsync();
         setSound(null);
@@ -621,13 +813,11 @@ const CallRecordingApp = () => {
         setPlaybackDuration(0);
       }
 
-      // If clicking the same file, just stop
       if (playingUri === file.uri) {
         setIsLoadingAudio(false);
         return;
       }
 
-      // Load and play new audio
       const { sound: newSound } = await Audio.Sound.createAsync(
         { uri: file.uri },
         { shouldPlay: true },
@@ -644,7 +834,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Pause audio
   const pauseAudio = async () => {
     if (sound) {
       await sound.pauseAsync();
@@ -652,7 +841,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Resume audio
   const resumeAudio = async () => {
     if (sound) {
       await sound.playAsync();
@@ -660,7 +848,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Stop audio
   const stopAudio = async () => {
     if (sound) {
       await sound.stopAsync();
@@ -673,14 +860,16 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Seek audio
   const seekAudio = async (position) => {
     if (sound) {
       await sound.setPositionAsync(position);
     }
   };
 
-  // Get call type color
+  // ============================================================================
+  // UTILITIES
+  // ============================================================================
+
   const getCallTypeColor = (callType) => {
     switch (callType.toLowerCase()) {
       case 'incoming': return COLORS.success;
@@ -690,7 +879,6 @@ const CallRecordingApp = () => {
     }
   };
 
-  // Filter files
   const filteredFiles = files.filter(file => {
     if (!searchQuery) return true;
     const query = searchQuery.toLowerCase();
@@ -702,14 +890,16 @@ const CallRecordingApp = () => {
     );
   });
 
-  // Custom Progress Bar
+  // ============================================================================
+  // CUSTOM COMPONENTS
+  // ============================================================================
+
   const CustomProgressBar = ({ progress }) => (
     <View style={styles.customProgressBar}>
       <View style={[styles.customProgressFill, { width: `${progress}%` }]} />
     </View>
   );
 
-  // Audio Progress Bar
   const AudioProgressBar = ({ position, duration, onSeek }) => {
     const progress = duration > 0 ? (position / duration) * 100 : 0;
     
@@ -723,7 +913,7 @@ const CallRecordingApp = () => {
           style={styles.audioProgressBar}
           onPress={(e) => {
             const { locationX } = e.nativeEvent;
-            const { width } = e.currentTarget.measure || { width: 300 };
+            const width = 300;
             const percent = locationX / width;
             const newPosition = duration * percent;
             onSeek(newPosition);
@@ -737,7 +927,10 @@ const CallRecordingApp = () => {
     );
   };
 
-  // Render call item
+  // ============================================================================
+  // RENDER FUNCTIONS
+  // ============================================================================
+
   const renderCallItem = ({ item }) => {
     const isCurrentlyPlaying = playingUri === item.uri;
     
@@ -786,7 +979,6 @@ const CallRecordingApp = () => {
             <Text style={styles.callFooterText}>{formatFileSize(item.size)}</Text>
           </View>
 
-          {/* Show progress bar if currently playing */}
           {isCurrentlyPlaying && (
             <View style={styles.miniProgressContainer}>
               <View style={styles.miniProgressBar}>
@@ -799,7 +991,6 @@ const CallRecordingApp = () => {
           )}
         </View>
 
-        {/* Play Button */}
         <Pressable
           style={styles.playButton}
           onPress={(e) => {
@@ -827,7 +1018,10 @@ const CallRecordingApp = () => {
     );
   };
 
-  // Settings Modal
+  // ============================================================================
+  // MODALS
+  // ============================================================================
+
   const SettingsModal = () => (
     <Modal
       animationType="slide"
@@ -845,9 +1039,42 @@ const CallRecordingApp = () => {
           </View>
 
           <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+            {/* Auto-Refresh Settings */}
+            <View style={styles.settingCard}>
+              <Text style={styles.settingCardTitle}>⚡ Auto-Refresh</Text>
+              <View style={styles.settingRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.settingLabel}>Auto-refresh after calls</Text>
+                  <Text style={styles.settingDescription}>
+                    Automatically refresh recordings when calls end
+                  </Text>
+                </View>
+                <Pressable
+                  style={[
+                    styles.toggleButton,
+                    autoRefreshEnabled && styles.toggleButtonActive
+                  ]}
+                  onPress={toggleAutoRefresh}
+                >
+                  <View style={[
+                    styles.toggleCircle,
+                    autoRefreshEnabled && styles.toggleCircleActive
+                  ]} />
+                </Pressable>
+              </View>
+              {lastCallTime && (
+                <View style={styles.lastCallInfo}>
+                  <Text style={styles.lastCallLabel}>Last call detected:</Text>
+                  <Text style={styles.lastCallTime}>
+                    {lastCallTime.toLocaleTimeString()} - {lastCallTime.toLocaleDateString()}
+                  </Text>
+                </View>
+              )}
+            </View>
+
             {/* Directory Management */}
             <View style={styles.settingCard}>
-              <Text style={styles.settingCardTitle}>Directory Management</Text>
+              <Text style={styles.settingCardTitle}>📁 Directory Management</Text>
               
               {selectedPath ? (
                 <>
@@ -897,7 +1124,7 @@ const CallRecordingApp = () => {
 
             {/* API Configuration */}
             <View style={styles.settingCard}>
-              <Text style={styles.settingCardTitle}>Server Configuration</Text>
+              <Text style={styles.settingCardTitle}>🌐 Server Configuration</Text>
               <Text style={styles.settingLabel}>API URL</Text>
               <TextInput
                 style={styles.settingInput}
@@ -914,7 +1141,7 @@ const CallRecordingApp = () => {
 
             {/* Statistics */}
             <View style={styles.settingCard}>
-              <Text style={styles.settingCardTitle}>Statistics</Text>
+              <Text style={styles.settingCardTitle}>📊 Statistics</Text>
               <View style={styles.statRow}>
                 <Text style={styles.statLabel}>Total Recordings</Text>
                 <Text style={styles.statValue}>{files.length}</Text>
@@ -934,14 +1161,16 @@ const CallRecordingApp = () => {
               {lastSync && (
                 <View style={styles.statRow}>
                   <Text style={styles.statLabel}>Last Sync</Text>
-                  <Text style={styles.statValue}>{lastSync.toLocaleDateString()}</Text>
+                  <Text style={styles.statValue}>
+                    {lastSync.toLocaleDateString()} {lastSync.toLocaleTimeString()}
+                  </Text>
                 </View>
               )}
             </View>
 
             {/* Danger Zone */}
             <View style={styles.settingCard}>
-              <Text style={styles.settingCardTitle}>Danger Zone</Text>
+              <Text style={styles.settingCardTitle}>⚠️ Danger Zone</Text>
               <Text style={styles.settingDescription}>
                 Clear sync history will mark all recordings as unsynced
               </Text>
@@ -955,7 +1184,6 @@ const CallRecordingApp = () => {
     </Modal>
   );
 
-  // Call Details Modal
   const CallDetailsModal = () => {
     if (!selectedCall) return null;
 
@@ -978,51 +1206,6 @@ const CallRecordingApp = () => {
             </View>
 
             <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
-              {/* Playback Control */}
-              {/* <View style={styles.detailCard}>
-                <View style={styles.playbackControlContainer}>
-                  <Pressable
-                    style={styles.playbackMainButton}
-                    onPress={() => {
-                      if (isCurrentlyPlaying) {
-                        if (isPlaying) {
-                          pauseAudio();
-                        } else {
-                          resumeAudio();
-                        }
-                      } else {
-                        playAudio(selectedCall);
-                      }
-                    }}
-                  >
-                    {isLoadingAudio && isCurrentlyPlaying ? (
-                      <ActivityIndicator size="large" color={COLORS.text.inverse} />
-                    ) : (
-                      <Text style={styles.playbackMainIcon}>
-                        {isCurrentlyPlaying && isPlaying ? '⏸' : '▶'}
-                      </Text>
-                    )}
-                  </Pressable>
-
-                  {isCurrentlyPlaying && (
-                    <Pressable
-                      style={styles.playbackStopButton}
-                      onPress={stopAudio}
-                    >
-                      <Text style={styles.playbackStopIcon}>⏹</Text>
-                    </Pressable>
-                  )}
-                </View>
-
-                {isCurrentlyPlaying && (
-                  <AudioProgressBar
-                    position={playbackPosition}
-                    duration={playbackDuration}
-                    onSeek={seekAudio}
-                  />
-                )}
-              </View> */}
-
               <View style={styles.detailCard}>
                 <Text style={styles.detailCardTitle}>Contact Information</Text>
                 <View style={styles.detailRow}>
@@ -1079,36 +1262,15 @@ const CallRecordingApp = () => {
                 <Text style={styles.filenameText}>{selectedCall.fileName}</Text>
               </View>
             </ScrollView>
-
-            {/* <View style={styles.modalFooter}>
-              <Pressable
-                style={[styles.primaryButton, selectedCall.synced && styles.secondaryButton]}
-                onPress={async () => {
-                  setModalVisible(false);
-                  const result = await uploadFileToServer(selectedCall);
-                  if (result.success) {
-                    await markFileAsSynced(selectedCall);
-                    setFiles(prevFiles => 
-                      prevFiles.map(f => 
-                        f.uri === selectedCall.uri ? { ...f, synced: true } : f
-                      )
-                    );
-                    Alert.alert('✓ Success', 'Recording uploaded successfully');
-                  } else {
-                    Alert.alert('✗ Error', `Upload failed: ${result.error}`);
-                  }
-                }}
-              >
-                <Text style={styles.primaryButtonText}>
-                  {selectedCall.synced ? '🔄 Re-upload Recording' : '📤 Upload Recording'}
-                </Text>
-              </Pressable>
-            </View> */}
           </View>
         </View>
       </Modal>
     );
   };
+
+  // ============================================================================
+  // MAIN RENDER
+  // ============================================================================
 
   return (
     <SafeAreaProvider>
@@ -1116,15 +1278,26 @@ const CallRecordingApp = () => {
         
         {/* Header */}
         <View style={styles.header}>
-          <View>
+          <View style={{ flex: 1 }}>
             <Text style={styles.headerTitle}>Call Recordings</Text>
             <Text style={styles.headerSubtitle}>
               {selectedPath ? `${files.length} recordings` : 'No directory selected'}
+              {autoRefreshEnabled && ' • Auto-refresh ON'}
             </Text>
           </View>
-          <Pressable onPress={() => setSettingsModalVisible(true)} style={styles.headerButton}>
-            <Text style={styles.headerButtonText}>⚙️</Text>
-          </Pressable>
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+            {newRecordingsCount > 0 && (
+              <View style={styles.newBadge}>
+                <Text style={styles.newBadgeText}>+{newRecordingsCount}</Text>
+              </View>
+            )}
+            {isRefreshing && (
+              <ActivityIndicator size="small" color={COLORS.text.inverse} />
+            )}
+            <Pressable onPress={() => setSettingsModalVisible(true)} style={styles.headerButton}>
+              <Text style={styles.headerButtonText}>⚙️</Text>
+            </Pressable>
+          </View>
         </View>
 
         {/* Action Buttons */}
@@ -1246,6 +1419,10 @@ const CallRecordingApp = () => {
   );
 };
 
+// ============================================================================
+// STYLES
+// ============================================================================
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -1292,6 +1469,19 @@ const styles = StyleSheet.create({
   },
   headerButtonText: {
     fontSize: 20,
+  },
+  newBadge: {
+    backgroundColor: COLORS.success,
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  newBadgeText: {
+    color: COLORS.text.inverse,
+    fontSize: 12,
+    fontWeight: '700',
   },
   actionContainer: {
     padding: 16,
@@ -1639,11 +1829,6 @@ const styles = StyleSheet.create({
   modalBody: {
     padding: 20,
   },
-  modalFooter: {
-    padding: 20,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border.light,
-  },
   settingCard: {
     backgroundColor: COLORS.surfaceAlt,
     borderRadius: 12,
@@ -1667,6 +1852,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text.secondary,
     marginBottom: 8,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
   },
   settingInput: {
     backgroundColor: COLORS.surface,
@@ -1706,6 +1897,53 @@ const styles = StyleSheet.create({
   pathDisplayText: {
     fontSize: 13,
     color: COLORS.text.primary,
+  },
+  toggleButton: {
+    width: 50,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.border.medium,
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleButtonActive: {
+    backgroundColor: COLORS.success,
+  },
+  toggleCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: COLORS.surface,
+    ...Platform.select({
+      ios: {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.2,
+        shadowRadius: 2,
+      },
+      android: {
+        elevation: 2,
+      },
+    }),
+  },
+  toggleCircleActive: {
+    transform: [{ translateX: 22 }],
+  },
+  lastCallInfo: {
+    marginTop: 12,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border.light,
+  },
+  lastCallLabel: {
+    fontSize: 12,
+    color: COLORS.text.secondary,
+    marginBottom: 4,
+  },
+  lastCallTime: {
+    fontSize: 13,
+    color: COLORS.text.primary,
+    fontWeight: '600',
   },
   statRow: {
     flexDirection: 'row',
@@ -1765,48 +2003,6 @@ const styles = StyleSheet.create({
     color: COLORS.text.secondary,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 4,
-  },
-  playbackControlContainer: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 16,
-    marginBottom: 16,
-  },
-  playbackMainButton: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: COLORS.primary,
-    justifyContent: 'center',
-    alignItems: 'center',
-    ...Platform.select({
-      ios: {
-        shadowColor: COLORS.primary,
-        shadowOffset: { width: 0, height: 4 },
-        shadowOpacity: 0.4,
-        shadowRadius: 8,
-      },
-      android: {
-        elevation: 6,
-      },
-    }),
-  },
-  playbackMainIcon: {
-    fontSize: 28,
-    color: COLORS.text.inverse,
-  },
-  playbackStopButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: COLORS.danger,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  playbackStopIcon: {
-    fontSize: 20,
-    color: COLORS.text.inverse,
   },
   audioProgressContainer: {
     marginTop: 8,

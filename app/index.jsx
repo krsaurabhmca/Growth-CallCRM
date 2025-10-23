@@ -9,12 +9,11 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
-  StatusBar,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  View,
+  View
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -99,7 +98,6 @@ const LoginScreen = () => {
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" />
       <LinearGradient
         colors={['#1976D2', '#2196F3', '#42A5F5']}
         style={styles.gradient}

@@ -6,8 +6,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function RootLayout() {
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: "#f9f9f9" }}>
-      <StatusBar barStyle="dark-content" backgroundColor="#f9f9f9" />
+    <SafeAreaView style={{ flex: 1, backgroundColor: "#fcfcfdff" }}>
+      <StatusBar barStyle="dark-content"  />
       <Tabs
         screenOptions={{
           headerShown: false,
@@ -31,11 +31,26 @@ export default function RootLayout() {
         }}
       >
 
+        <Tabs.Screen
+          name="LiveCallLog"
+          options={{
+            title: "Call Logs",
+            tabBarIcon: ({ color, size, focused }) => (
+              <Ionicons
+                name={focused ? "call" : "call-outline"}
+                size={size}
+                color={color}
+              />
+            ),
+          }}
+        />   
+
+
         {/* 📞 Call Logs Tab */}
         <Tabs.Screen
           name="calllog"
           options={{
-            title: "Call Logs",
+            title: "Call Report",
             tabBarIcon: ({ color, size, focused }) => (
               <Ionicons
                 name={focused ? "people" : "people-outline"}
@@ -64,7 +79,7 @@ export default function RootLayout() {
     
         {/* 🏠 Recordings Tab */}
         <Tabs.Screen
-          name="home"
+          name="callRecording"
           options={{
             title: "Recordings",
             tabBarIcon: ({ color, size, focused }) => (
@@ -76,6 +91,8 @@ export default function RootLayout() {
             ),
           }}
         />   
+
+        
 
         
       </Tabs>
